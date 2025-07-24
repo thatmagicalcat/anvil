@@ -1,3 +1,4 @@
+#include "defs.h"
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -6,13 +7,6 @@
 
 #include "filetime.h"
 #include "tomlc17.h"
-
-typedef uint64_t u64;
-typedef uint32_t u32;
-typedef uint8_t u8;
-typedef int64_t i64;
-typedef int32_t i32;
-typedef int8_t i8;
 
 void print_main_help();
 
