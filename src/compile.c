@@ -11,26 +11,58 @@
 #include "compile.h"
 
 // Helper function. Returns flags used to compile the target and sets their size o sz
-static const char *get_flags(const char *target, toml_datum_t targtab, int *sz)
+static const char *get_flags(const char *target, toml_datum_t targtab, size_t *sz)
     __attribute__((nonnull));
+
 // Helper function. Returns full compiling command. NULL if it fails
-static const char *get_compile_cmd(const char *target, toml_datum_t targtab)
+static const char *get_compile_cmd(const char *targett, toml_datum_t targtab)
     __attribute__((nonnull));
 
+// Helper function. Removes extension from a file path
+static int remove_extension(char *str) __attribute__((nonnull));
 
-// Compiles target based on the top tab of a toml file
+
+/*
+ * Compiles a file and it's dependencies as objects.
+ * TODO: Check if an object file alredy exists and if
+ *       it is newer or older then it's dependencies.
+ *       (This currently may compile the same target
+ *       more then once.)
+ */
 int compile(const char *target, toml_datum_t toptab)
 {
-    int ret;
+    toml_datum_t targtab;
+    toml_datum_t deps;
+    char *target_name;
 
-    toml_datum_t targtab = toml_seek(toptab, target);
-    if (targtab.type != TOML_TABLE) {
-        fprintf(stderr, "%s table is either of invalid type or does not exists\n", target);
-        errno = EINVAL;
+    /* Allocates target_name and removes it's extension. It is dynamically
+     * Allocated to aliviate the stack call as solve_dependencies() calls 
+     * compile() (It is freed before any recursion happens)
+     */
+    target_name = malloc((PATH_MAX + 1) * sizeof(*target_name));
+    if (!target_name) {
+        return -1;
+    }
+    strncpy(target_name, target, PATH_MAX);
+    if (remove_extension(target_name) == -1) {
+        fprintf(stderr, "could not remove extension from %s\n", target_name);
+        free(target_name);
         return -1;
     }
 
-    toml_datum_t deps = toml_seek(targtab, "dependencies");
+    // gets the target toml table
+    targtab = toml_seek(toptab, target_name);
+    free(target_name);
+    if (targtab.type != TOML_TABLE) {
+        if (targtab.type == TOML_UNKNOWN) {
+            return compile_no_config(target);
+        }
+        fprintf(stderr, "%s table is either of invalid type or does not exists\n", target);
+        return -1;
+    }
+
+    // gets the targer dependencies toml table
+    deps = toml_seek(targtab, "dependencies");
     if (deps.type != TOML_ARRAY) {
         // This allows for no dependencies
         if (deps.type == TOML_UNKNOWN) {
@@ -38,32 +70,22 @@ int compile(const char *target, toml_datum_t toptab)
         }
         fprintf(stderr, "%s.dependencies is either of invalid type"
                         "or does not exist\n", target);
-        errno = EINVAL;
         return -1;
     }
 
-    // Solves all dependencies from a file. Aborts if operation fails
-    errno = 0;
+    // Solves all dependencies from a file. returns -1 if operation fails
     if (solve_dependencies(target, toptab, deps) == -1) {
-        int save_errno = errno;
         fprintf(stderr, "could not solve dependencies for %s\n", target);
-        errno = save_errno;
         return -1;
     }
 
 compile_target:
+    // Writes command on the screen and executes it if it is not NULL
     const char *cmd = get_compile_cmd(target, targtab);
-    if (!cmd) {
+    if (!cmd || (puts(cmd) && system(cmd) == -1)) {
         return -1;
     }
-
-    puts(cmd);
-    if (system(cmd) == -1) {
-        int save_errno = errno;
-        fprintf(stderr, "%s: %s\n", cmd, strerror(save_errno));
-        errno = save_errno;
-        return -1;
-    }
+ 
     return 0;
 }
 
@@ -77,15 +99,15 @@ int solve_dependencies(const char *target, toml_datum_t toptab, toml_datum_t dep
 
     // Iterates trough all dependencies and calls compile() on them.
     for (int i = 0; i < deps.u.arr.size; ++i) {
+        // error checks
         if (deps.u.arr.elem[i].type != TOML_STRING) {
             fprintf(stderr, "dependency number %i of %s is of invalid type\n", i, target);
-            errno = EINVAL;
             return -1;
+        // checks if solving depedency is needed. If check fails, this is executed
         } else if ((ret = filetime_cmp(target, deps.u.arr.elem[i].u.str.ptr)) == -1) {
-            int save_errno = errno;
-            fprintf(stderr, "%s: %s\n", deps.u.arr.elem[i].u.str.ptr, strerror(save_errno));
-            errno = save_errno;
+            fprintf(stderr, "%s: %s\n", deps.u.arr.elem[i].u.str.ptr, strerror(errno));
             return -1;
+        // if dependency has to be solved, attempts to solves it.
         } else if (ret) {
             if (compile(deps.u.arr.elem[i].u.str.ptr, toptab) == -1) {
                 return -1;
@@ -96,43 +118,57 @@ int solve_dependencies(const char *target, toml_datum_t toptab, toml_datum_t dep
     return 0;
 }
 
+int compile_no_config(const char *target)
+{
+    char cmd[COMPILE_CMD_MAX] = "ccache gcc -c ";
+    if (strnlen(cmd, COMPILE_CMD_MAX) + strlen(target) + 1 > COMPILE_CMD_MAX) {
+        errno = ERANGE;
+        return -1;
+    }
+    strcat(cmd, target);
+    puts(cmd);
+    return system(cmd);
+
+}
+
 
 // Helper functions:
-
 static const char *get_compile_cmd(const char *target, toml_datum_t targtab)
 {
-
-    int flags_sz;
+    size_t flags_sz;
     static char cmd[COMPILE_CMD_MAX];
 
+    // Checks if a shell exists
     if (!system(NULL)) {
         fprintf(stderr, "no shell available while processing target %s\n", target);
         return NULL;
     }
-
+ 
+    // Gets flags for the compile command
     const char *flags = get_flags(target, targtab, &flags_sz);
     if (!flags) {
         return NULL;
     }
 
-    strcpy(cmd, "ccache gcc ");
-    if (strnlen(cmd, COMPILE_CMD_MAX) + strlen(target) + flags_sz + 4 > COMPILE_CMD_MAX) {
+    // Builds the compile command and returns it. Returns NULL if it is too big
+    strcpy(cmd, "ccache gcc -c ");
+    if (strnlen(cmd, COMPILE_CMD_MAX) + strlen(target) + flags_sz + 1 > COMPILE_CMD_MAX) {
         fprintf(stderr, "flags argument for target %s is too long\n", target);
         errno = ERANGE;
         return NULL;
     }
-    
-    strcat(cmd, target);
-    strcat(cmd, ".c ");
     strncat(cmd, flags, flags_sz);
+    strcat(cmd, " ");
+    strcat(cmd, target);
     return cmd;
 }
 
-static const char *get_flags(const char *target, toml_datum_t targtab, int *sz)
+static const char *get_flags(const char *target, toml_datum_t targtab, size_t *sz)
 {
+    // Gets the flags string on the targets tab
     toml_datum_t flags_tab = toml_seek(targtab, "flags");
     if (flags_tab.type != TOML_STRING) {
-        // This allows to not set any flags
+        // If there are no flags, exit early and return an empty string
         if (flags_tab.type == TOML_UNKNOWN) {
             *sz = 0;
             return "";
@@ -143,6 +179,20 @@ static const char *get_flags(const char *target, toml_datum_t targtab, int *sz)
         return NULL;
     }
 
-    *sz = flags_tab.u.str.len;
+    assert(flags_tab.u.str.len >= 0);
+    *sz = (size_t)flags_tab.u.str.len;
     return flags_tab.u.str.ptr;
+}
+
+static int remove_extension(char *str)
+{
+    const size_t str_size = strlen(str);
+    for (size_t i = str_size-1; i < str_size; --i) {
+        if (str[i] == '.') {
+            str[i] = '\0';
+            return 0;
+        }
+    }
+
+    return -1;
 }
