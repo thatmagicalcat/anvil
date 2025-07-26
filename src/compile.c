@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <sys/types.h>
+#include <dirent.h>
 
 #include "filetime.h"
 #include "tomlc17.h"
@@ -19,8 +21,9 @@ static const char *get_compile_cmd(const char *targett, toml_datum_t targtab)
     __attribute__((nonnull));
 
 // Helper function. Removes extension from a file path
-static int remove_extension(char *str) __attribute__((nonnull));
+static int remove_extension(char *fname) __attribute__((nonnull));
 
+static const char *get_extension(const char *fname) __attribute__((nonnull));
 
 /*
  * Compiles a file and it's dependencies as objects.
@@ -36,7 +39,7 @@ int compile(const char *target, toml_datum_t toptab)
     char *target_name;
 
     /* Allocates target_name and removes it's extension. It is dynamically
-     * Allocated to aliviate the stack call as solve_dependencies() calls 
+     * Allocated to aliviate the stack call as solve_dependencies() calls
      * compile() (It is freed before any recursion happens)
      */
     target_name = malloc((PATH_MAX + 1) * sizeof(*target_name));
@@ -85,8 +88,56 @@ compile_target:
     if (!cmd || (puts(cmd) && system(cmd) == -1)) {
         return -1;
     }
- 
+
     return 0;
+}
+
+int link_all(toml_datum_t toptab)
+{
+    toml_datum_t tmptab;
+    DIR *dirp;
+    struct dirent *dep;
+    const char *ext;
+    char cmd[LINK_CMD_MAX];
+
+    strncpy(cmd, "ccache gcc ", LINK_CMD_MAX);
+
+    dirp = opendir(".");
+    if (!dirp) {
+        perror("link_all");
+        return -1;
+    }
+
+    while ((dep = readdir(dirp))) {
+        ext = get_extension(dep->d_name);
+        if (!ext || (strcmp(ext, ".o") != 0))  {
+            continue;
+        } else if (strnlen(cmd, LINK_CMD_MAX) + _D_EXACT_NAMLEN(dep) + 2 > LINK_CMD_MAX) {
+            fputs("Linking command is too big. You can try recompiling anvil after"
+                    "Changing LINK_CMD_MAX at include/compile.h\n", stderr);
+            return -1;
+        }
+
+        strcat(cmd, dep->d_name);
+        strcat(cmd, " ");
+    }
+
+    tmptab = toml_seek(toptab, "package.name");
+    if (tmptab.type != TOML_STRING) {
+        fputs("You must have a string value for package.name at your config file\n", stderr);
+        return -1;
+    }
+
+    if (strnlen(cmd, LINK_CMD_MAX) + (size_t)tmptab.u.str.len + 4 > LINK_CMD_MAX) {
+            fputs("Linking command is too big. You can try recompiling anvil after"
+                    "Changing LINK_CMD_MAX at include/compile.h\n", stderr);
+            return -1;
+    }
+
+    strcat(cmd, "-o ");
+    strncat(cmd, tmptab.u.str.ptr, (size_t)tmptab.u.str.len);
+    puts(cmd);
+    return system(cmd);
 }
 
 /*
@@ -143,7 +194,7 @@ static const char *get_compile_cmd(const char *target, toml_datum_t targtab)
         fprintf(stderr, "no shell available while processing target %s\n", target);
         return NULL;
     }
- 
+
     // Gets flags for the compile command
     const char *flags = get_flags(target, targtab, &flags_sz);
     if (!flags) {
@@ -157,9 +208,10 @@ static const char *get_compile_cmd(const char *target, toml_datum_t targtab)
         errno = ERANGE;
         return NULL;
     }
-    strncat(cmd, flags, flags_sz);
-    strcat(cmd, " ");
+
     strcat(cmd, target);
+    strcat(cmd, " ");
+    strncat(cmd, flags, flags_sz);
     return cmd;
 }
 
@@ -184,15 +236,37 @@ static const char *get_flags(const char *target, toml_datum_t targtab, size_t *s
     return flags_tab.u.str.ptr;
 }
 
-static int remove_extension(char *str)
+static int remove_extension(char *fname)
 {
-    const size_t str_size = strlen(str);
+    const size_t str_size = strlen(fname);
     for (size_t i = str_size-1; i < str_size; --i) {
-        if (str[i] == '.') {
-            str[i] = '\0';
+        if (fname[i] == '.') {
+            fname[i] = '\0';
             return 0;
         }
     }
 
     return -1;
+}
+
+static const char *get_extension(const char *fname)
+{
+    static char ext[PATH_MAX+1];
+    size_t i, j, n, k;
+
+    n = strlen(fname);
+    assert(n <= PATH_MAX);
+
+    for (i = n-1, k = 0; i <= n && i <= PATH_MAX; --i, ++k) {
+        if (fname[i] == '.') {
+            break;
+        }
+    }
+
+    for (i = n-k-1, j = 0; i < n && j < PATH_MAX; ++i, ++j) {
+        ext[j] = fname[i];
+    }
+
+    ext[j] = '\0';
+    return ext;
 }
