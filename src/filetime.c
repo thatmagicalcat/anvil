@@ -22,7 +22,7 @@ int filetime_cmp(const char *restrict file1, const char *restrict file2)
 
 static int timecmp(struct stat *st1, struct stat *st2)
 {
-	return (st1->st_mtim.tv_sec != st2->st_mtim.tv_sec ?
+	return (int)(st1->st_mtim.tv_sec != st2->st_mtim.tv_sec ?
 		st1->st_mtim.tv_sec - st2->st_mtim.tv_sec :
 		st1->st_mtim.tv_nsec - st2->st_mtim.tv_nsec);
 }
